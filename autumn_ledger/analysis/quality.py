@@ -82,6 +82,23 @@ def comparison_issues(comparison):
     return result
 
 
+def reconciliation_issues(reconciliation, period):
+    result = []
+    unresolved = reconciliation["unresolved_groups"]
+    held = reconciliation["held_evidence"]
+    if unresolved or held:
+        result.append(issue("unresolved_reconciliation", "error",
+                            "存在未解决的跨来源核对关系，去重口径只能预览不能发布",
+                            {"period": period, "groups": unresolved,
+                             "evidence": [item["id"] for item in held]}))
+    removed = reconciliation["difference"]["measures"]["orders"]
+    if removed:
+        result.append(issue("deduplicated_sales", "info",
+                            "去重口径已扣除跨来源重复销售，来源口径仍保留原账",
+                            {"period": period, "removed_orders": removed}))
+    return result
+
+
 def summarize(issues):
     counts = Counter(item["severity"] for item in issues)
     return {"publishable": counts["error"] == 0, "errors": counts["error"],
@@ -95,6 +112,7 @@ def quality_report(periods, request, comparison):
         issues += volume_issues(period["cube"], request["minimum_orders"], name)
         issues += calendar_issues(period["exposure"], request["cities"], name)
         issues += record_issues(period["orders"], period["coverage"], name)
+        issues += reconciliation_issues(period["sale_reconciliation"], name)
     issues += comparison_issues(comparison)
     issues.append(issue("observational_sample", "info", "结果仅描述所选来源已收到的订单，不作总体或政策因果推断"))
     return summarize(issues)
@@ -119,4 +137,14 @@ def validate_result(result):
         coverage = period["coverage_summary"]
         if coverage["expected_cells"] != coverage["complete_cells"] + coverage["partial_cells"] + coverage["missing_cells"]:
             failures.append(f"{name}:coverage_balance")
+        reconciliation = period["sale_reconciliation"]
+        source = reconciliation["source_view"]["totals"]
+        dedup = reconciliation["dedup_view"]["totals"]
+        for metric in MEASURES:
+            if source[metric] != total[metric]:
+                failures.append(f"{name}:source_view:{metric}")
+            if reconciliation["difference"]["measures"][metric] != source[metric] - dedup[metric]:
+                failures.append(f"{name}:dedup_difference:{metric}")
+        if dedup["orders"] > source["orders"]:
+            failures.append(f"{name}:dedup_exceeds_source")
     return {"ok": not failures, "failures": failures}

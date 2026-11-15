@@ -9,7 +9,8 @@ from ..analysis.narrative import explain_result
 from ..analysis.trends import robust_flags
 from .models import (CatalogWrite, CalendarWrite, CoverageWrite, EventBatch, FileBatch, FileInspect,
                      AnalysisRequest, EditionRequest, DecisionRequest, PublishRequest, RetireRequest,
-                     EditionComparison, ProfileRequest, AnomalyRequest)
+                     EditionComparison, ProfileRequest, AnomalyRequest, EvidenceSubmission,
+                     SettleRequest, AdoptRequest, GroupActionRequest)
 
 
 def request_value(value):
@@ -182,6 +183,24 @@ def create_app(path=None):
         return Response(content, media_type="text/csv; charset=utf-8",
                         headers={"Content-Disposition": f'attachment; filename="{identity}-{table}.csv"'})
 
+    @app.get("/editions/{identity}/sales.csv")
+    def sales_export(identity: str, period: str = "current"):
+        content = ledger.export.sales(identity, period)
+        return Response(content, media_type="text/csv; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="{identity}-sales.csv"'})
+
+    @app.get("/editions/{identity}/sale-groups.csv")
+    def sale_groups_export(identity: str, period: str = "current"):
+        content = ledger.export.sale_groups(identity, period)
+        return Response(content, media_type="text/csv; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="{identity}-sale-groups.csv"'})
+
+    @app.get("/editions/{identity}/sale-lineage.csv")
+    def sale_lineage_export(identity: str):
+        content = ledger.export.sale_lineage(identity)
+        return Response(content, media_type="text/csv; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="{identity}-sale-lineage.csv"'})
+
     @app.get("/editions/{identity}/export.zip")
     def zip_export(identity: str):
         content = ledger.export.bundle(identity)
@@ -249,6 +268,48 @@ def create_app(path=None):
     @app.get("/sources/{source}/snapshot-difference")
     def source_difference(source: str, before: int, after: int):
         return ledger.receipts.between_snapshots(source, before, after)
+
+    @app.post("/reconciliation/evidence")
+    def submit_evidence(body: EvidenceSubmission):
+        members = [member.model_dump() for member in body.members]
+        return ledger.linkage.submit_evidence(body.evidence_id, members, body.note, body.actor)
+
+    @app.get("/reconciliation/evidence")
+    def list_evidence(status: str | None = None, limit: int = 100, offset: int = 0):
+        return ledger.linkage.list_evidence(status, limit, offset)
+
+    @app.get("/reconciliation/evidence/{evidence_id}")
+    def get_evidence(evidence_id: str):
+        return ledger.linkage.get_evidence(evidence_id)
+
+    @app.post("/reconciliation/evidence/{evidence_id}/settle")
+    def settle_evidence(evidence_id: str, body: SettleRequest):
+        return ledger.linkage.settle(evidence_id, body.action, body.actor, body.note)
+
+    @app.get("/reconciliation/groups")
+    def list_groups(status: str | None = None, revision: int | None = None,
+                    limit: int = 100, offset: int = 0):
+        return ledger.linkage.list_groups(status, revision, limit, offset)
+
+    @app.get("/reconciliation/groups/{group_id}")
+    def get_group(group_id: str, revision: int | None = None):
+        return ledger.linkage.get_group(group_id, revision)
+
+    @app.post("/reconciliation/groups/{group_id}/adopt")
+    def adopt_group(group_id: str, body: AdoptRequest):
+        return ledger.linkage.adopt(group_id, body.source, body.actor, body.note, body.expected_sequence)
+
+    @app.post("/reconciliation/groups/{group_id}/revoke")
+    def revoke_group(group_id: str, body: GroupActionRequest):
+        return ledger.linkage.revoke(group_id, body.actor, body.note)
+
+    @app.post("/reconciliation/groups/{group_id}/dissolve")
+    def dissolve_group(group_id: str, body: GroupActionRequest):
+        return ledger.linkage.dissolve(group_id, body.actor, body.note)
+
+    @app.get("/reconciliation/groups/{group_id}/history")
+    def group_history(group_id: str):
+        return ledger.linkage.group_history(group_id)
 
     @app.get("/analysis-readiness")
     def readiness(start: str, end: str, city: list[str] = Query(), source: list[str] = Query(),

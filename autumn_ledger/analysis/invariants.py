@@ -1,6 +1,7 @@
 from math import isfinite
 
-from .cubes import MEASURES
+from ..records.contracts import contribution
+from .cubes import MEASURES, add_measures, empty_measures
 
 
 def check(name, condition, expected=None, actual=None):
@@ -82,6 +83,57 @@ def check_lineage(result):
             check("lineage_heads", sorted(expected) == sorted(actual), len(expected), len(actual))]
 
 
+def check_reconciliation(period):
+    reconciliation = period["sale_reconciliation"]
+    sales = reconciliation["dedup_view"]["sales"]
+    excluded = reconciliation["difference"]["excluded"]
+    sale_keys = [(sale["source"], sale["order_id"], sale["sequence"]) for sale in sales]
+    excluded_keys = [(item["source"], item["order_id"], item["sequence"]) for item in excluded]
+    selected_keys = sorted((order["source"], order["order_id"], order["sequence"])
+                           for order in period["orders"])
+    result = [check("dedup_partition", sorted(sale_keys + excluded_keys) == selected_keys,
+                    len(selected_keys), len(sale_keys) + len(excluded_keys)),
+              check("dedup_unique", len(sale_keys) == len(set(sale_keys)))]
+    recomputed = empty_measures()
+    for sale in sales:
+        add_measures(recomputed, contribution(sale))
+    for metric in MEASURES:
+        result.append(check("dedup_totals:" + metric,
+                            reconciliation["dedup_view"]["totals"][metric] == recomputed[metric],
+                            recomputed[metric], reconciliation["dedup_view"]["totals"][metric]))
+        result.append(check("source_view:" + metric,
+                            reconciliation["source_view"]["totals"][metric] == period["cube"]["totals"][metric],
+                            period["cube"]["totals"][metric],
+                            reconciliation["source_view"]["totals"][metric]))
+    counted_groups = [sale["sale_group"] for sale in sales if sale["sale_group"] is not None]
+    result.append(check("dedup_group_unique", len(counted_groups) == len(set(counted_groups))))
+    groups = {group["id"]: group for group in reconciliation["groups"]}
+    for sale in sales:
+        if sale["sale_basis"] != "adopted":
+            continue
+        group = groups.get(sale["sale_group"])
+        decision = (group or {}).get("decision") or {}
+        result.append(check("adopted_matches_decision:" + str(sale["sale_group"]),
+                            group is not None and group["status"] == "adopted"
+                            and decision.get("source") == sale["source"]
+                            and decision.get("order_id") == sale["order_id"]
+                            and decision.get("sequence") == sale["sequence"]))
+    return result
+
+
+def check_sale_lineage(result):
+    expected = []
+    for name, period in result["periods"].items():
+        for sale in period["sale_reconciliation"]["dedup_view"]["sales"]:
+            expected.append((name, sale["source"], sale["order_id"], sale["sequence"]))
+    actual = [(row["period"], row["source"], row["order_id"], row["sequence"])
+              for row in result["sale_lineage"]]
+    lineage_keys = {(row["period"], row["source"], row["order_id"], row["sequence"])
+                    for row in result["lineage"]}
+    return [check("sale_lineage_heads", sorted(expected) == sorted(actual), len(expected), len(actual)),
+            check("sale_lineage_subset", all(key in lineage_keys for key in actual))]
+
+
 def check_finite(value, path="result"):
     failures = []
     if isinstance(value, float) and not isfinite(value):
@@ -96,10 +148,10 @@ def check_finite(value, path="result"):
 
 
 def inspect_result(result):
-    checks = check_lineage(result)
+    checks = check_lineage(result) + check_sale_lineage(result)
     for name, period in result["periods"].items():
         period_checks = check_totals(period["cube"]) + check_distributions(period["cube"])
-        period_checks += check_daily(period) + check_coverage(period)
+        period_checks += check_daily(period) + check_coverage(period) + check_reconciliation(period)
         checks += [{**item, "period": name} for item in period_checks]
     nonfinite = check_finite(result)
     checks.append(check("finite_numbers", not nonfinite, [], nonfinite))

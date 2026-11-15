@@ -1,4 +1,4 @@
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 STATEMENTS = (
     "CREATE TABLE IF NOT EXISTS ledger_meta (singleton INTEGER PRIMARY KEY CHECK(singleton=1), schema_version INTEGER NOT NULL, revision INTEGER NOT NULL)",
@@ -21,13 +21,25 @@ STATEMENTS = (
     "CREATE TABLE IF NOT EXISTS publication_history (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, generation INTEGER NOT NULL, edition_id TEXT NOT NULL REFERENCES editions(id), actor TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(channel,generation))",
 )
 
+V2_STATEMENTS = (
+    "CREATE TABLE IF NOT EXISTS sale_groups (id TEXT PRIMARY KEY, evidence_id TEXT NOT NULL, created_revision INTEGER NOT NULL, dissolved_revision INTEGER, created_at TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS sale_group_members (group_id TEXT NOT NULL REFERENCES sale_groups(id), source TEXT NOT NULL, order_id TEXT NOT NULL, PRIMARY KEY(group_id,source))",
+    "CREATE INDEX IF NOT EXISTS sale_member_order ON sale_group_members(source,order_id)",
+    "CREATE TABLE IF NOT EXISTS link_evidence (id TEXT PRIMARY KEY, digest TEXT NOT NULL, revision INTEGER NOT NULL, status TEXT NOT NULL CHECK(status IN ('accepted','duplicate','held','rejected')), settled_revision INTEGER, group_id TEXT, members TEXT NOT NULL, actor TEXT NOT NULL, note TEXT NOT NULL, created_at TEXT NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS evidence_status ON link_evidence(status,revision)",
+    "CREATE TABLE IF NOT EXISTS adoption_decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id TEXT NOT NULL REFERENCES sale_groups(id), revision INTEGER NOT NULL, action TEXT NOT NULL CHECK(action IN ('adopt','revoke')), source TEXT, order_id TEXT, sequence INTEGER, head_digest TEXT, actor TEXT NOT NULL, note TEXT NOT NULL, created_at TEXT NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS adoption_group ON adoption_decisions(group_id,revision)",
+)
+
 
 def initialize(connection):
-    for statement in STATEMENTS:
+    for statement in STATEMENTS + V2_STATEMENTS:
         connection.execute(statement)
     row = connection.execute("SELECT schema_version FROM ledger_meta WHERE singleton=1").fetchone()
-    if row[0] != SCHEMA_VERSION:
+    if row[0] > SCHEMA_VERSION:
         raise RuntimeError("数据库模式版本不受支持")
+    if row[0] < SCHEMA_VERSION:
+        connection.execute("UPDATE ledger_meta SET schema_version=? WHERE singleton=1", (SCHEMA_VERSION,))
     violations = connection.execute("PRAGMA foreign_key_check").fetchall()
     if violations:
         raise RuntimeError("数据库外键检查失败")

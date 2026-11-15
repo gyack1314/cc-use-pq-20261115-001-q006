@@ -71,6 +71,29 @@ def summarize_comparison(comparison):
     return result
 
 
+def summarize_reconciliation(period):
+    reconciliation = period["sale_reconciliation"]
+    source = reconciliation["source_view"]["totals"]
+    dedup = reconciliation["dedup_view"]["totals"]
+    removed = reconciliation["difference"]["measures"]["orders"]
+    result = []
+    if removed or reconciliation["unresolved_groups"] or reconciliation["held_evidence"]:
+        result.append(observation(
+            "dedup_view",
+            f"来源口径{source['orders']}笔订单，去重口径{dedup['orders']}笔销售、"
+            f"{dedup['travelers']}人次；差异{removed}笔来自跨来源重复或未解决核对。",
+            {"source_totals": source, "dedup_totals": dedup,
+             "unresolved_groups": reconciliation["unresolved_groups"],
+             "held_evidence": [item["id"] for item in reconciliation["held_evidence"]]}))
+    if reconciliation["unresolved_groups"] or reconciliation["held_evidence"]:
+        result.append(observation(
+            "reconciliation_pending",
+            "存在未解决的跨来源核对关系，去重口径只能预览，解决前不能发布。",
+            {"groups": reconciliation["unresolved_groups"],
+             "evidence": [item["id"] for item in reconciliation["held_evidence"]]}))
+    return result
+
+
 def explain_result(result):
     names = {row["id"]: row["name"] for row in result["references"]["cities"]}
     observations = []
@@ -79,6 +102,7 @@ def explain_result(result):
     current = result["periods"]["current"]
     observations += summarize_days(current)
     observations += summarize_peaks(current, names)
+    observations += summarize_reconciliation(current)
     observations += summarize_comparison(result["comparison"])
     blockers = [issue for issue in result["quality"]["issues"] if issue["severity"] == "error"]
     return {"data_revision": result["data_revision"], "publishable": not blockers,

@@ -80,8 +80,64 @@ def run_demo():
             assert client.post(f"/editions/{identity}/verify").json()["ok"]
             replacement = client.post("/editions", json={"request_key": "demo-2", "request": request_data()}).json()
             assert replacement["summary"]["net_cents"] == 110000
+            linkage = run_linkage_demo(ledger, client)
             assert ledger.database.integrity()["ok"]
             return {"ok": True, "orders": 3, "original_net_cents": 120000, "corrected_net_cents": 110000,
                     "stale_publish_blocked": True, "old_snapshot_reproduced": True,
                     "bundle_verified": True, "revision_before_correction": revision,
-                    "final_revision": ledger.database.revision()}
+                    "final_revision": ledger.database.revision(), **linkage}
+
+
+def run_linkage_demo(ledger, client):
+    """跨渠道同一销售：平台与代理各记一笔，凭证据建组、采信、复核与拆开。"""
+    from .values import date_range
+    for city in ("sz", "nj"):
+        for day in date_range("2026-11-09", "2026-11-22"):
+            ledger.coverage.put({"source": "beta", "city": city, "day": day.isoformat(), "status": "complete"})
+    duplicate = synthetic_event("bd1", "2026-11-17", gross=49500)
+    ledger.intake.ingest("beta", "beta-initial", [duplicate])
+    both = request_data(sources=["alpha", "beta"])
+    submission = {"evidence_id": "demo-ev-1", "actor": "reconciler", "note": "平台与代理同团销售",
+                  "members": [{"source": "alpha", "order_id": "a2"}, {"source": "beta", "order_id": "bd1"}]}
+    evidence = client.post("/reconciliation/evidence", json=submission)
+    assert evidence.status_code == 200, evidence.text
+    group_id = evidence.json()["group_id"]
+    assert evidence.json()["status"] == "accepted"
+    replay = client.post("/reconciliation/evidence", json=submission).json()
+    assert replay["replayed"] and replay["group_id"] == group_id
+    pending = client.post("/analysis/preview", json=both).json()
+    assert pending["unresolved_reconciliation"]
+    blocked = client.post("/editions", json={"request_key": "demo-3", "request": both}).json()
+    assert not blocked["quality"]["publishable"]
+    adopted = client.post(f"/reconciliation/groups/{group_id}/adopt",
+                          json={"source": "alpha", "actor": "reconciler", "note": "采信平台账"})
+    assert adopted.status_code == 200, adopted.text
+    deduped = client.post("/editions", json={"request_key": "demo-4", "request": both}).json()
+    assert deduped["quality"]["publishable"]
+    stored = client.get(f"/editions/{deduped['id']}").json()
+    reconciliation = stored["result"]["periods"]["current"]["sale_reconciliation"]
+    assert reconciliation["source_view"]["totals"]["orders"] == 4
+    assert reconciliation["dedup_view"]["totals"]["orders"] == 3
+    assert reconciliation["difference"]["measures"]["orders"] == 1
+    assert reconciliation["groups"][0]["differences"][0]["field"] == "gross_cents"
+    ledger.intake.ingest("alpha", "a2-refund", [synthetic_event("a2", sequence=2, refund=6000)])
+    assert client.get(f"/reconciliation/groups/{group_id}").json()["status"] == "review"
+    reopened = client.post("/editions", json={"request_key": "demo-5", "request": both}).json()
+    assert not reopened["quality"]["publishable"]
+    revoked = client.post(f"/reconciliation/groups/{group_id}/revoke",
+                          json={"actor": "reconciler", "note": "先撤销旧采信"})
+    assert revoked.json()["status"] == "pending"
+    dissolved = client.post(f"/reconciliation/groups/{group_id}/dissolve",
+                            json={"actor": "reconciler", "note": "证据有误，拆开关联"})
+    assert dissolved.json()["status"] == "dissolved"
+    restored = client.post("/editions", json={"request_key": "demo-6", "request": both}).json()
+    restored_view = client.get(f"/editions/{restored['id']}").json()[
+        "result"]["periods"]["current"]["sale_reconciliation"]
+    assert restored_view["dedup_view"]["totals"]["orders"] == 4
+    assert restored["quality"]["publishable"]
+    assert client.post(f"/editions/{deduped['id']}/verify").json()["ok"]
+    sales_csv = client.get(f"/editions/{deduped['id']}/sales.csv")
+    assert sales_csv.status_code == 200 and "bd1" not in sales_csv.text
+    return {"linkage_group": group_id, "dedup_orders": 3, "source_orders": 4,
+            "review_reopened_on_revision_change": True, "restored_after_dissolve": True,
+            "pinned_edition_still_verifies": True}

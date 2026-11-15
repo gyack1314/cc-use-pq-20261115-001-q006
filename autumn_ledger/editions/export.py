@@ -4,6 +4,7 @@ import json
 import zipfile
 
 from ..errors import require
+from ..records.contracts import contribution
 from ..values import canonical, fingerprint, identifier
 from ..analysis.cubes import MEASURES
 
@@ -79,15 +80,65 @@ class Export:
         return encode_csv(["period", "source", "order_id", "event_id", "sequence", "revision", "digest"],
                           edition["result"]["lineage"])
 
+    def sale_lineage(self, identity):
+        """去重口径血缘：每笔销售可追到店时的组、采信决定与订单修订。"""
+        edition = self.edition(identity)
+        return encode_csv(["period", "basis", "sale_group", "adoption_revision", "source",
+                           "order_id", "event_id", "sequence", "revision", "digest"],
+                          edition["result"]["sale_lineage"])
+
+    def _reconciliation(self, identity, period):
+        edition = self.edition(identity)
+        require(period in edition["result"]["periods"], "unknown_period", "分析没有该期间")
+        return edition, edition["result"]["periods"][period]["sale_reconciliation"]
+
+    def sales(self, identity, period="current"):
+        """去重口径逐笔销售：金额与旅客量与分析结果中的去重合计一致。"""
+        edition, reconciliation = self._reconciliation(identity, period)
+        rows = []
+        for sale in reconciliation["dedup_view"]["sales"]:
+            rows.append({"edition_id": identity, "data_revision": edition["data_revision"],
+                         "period": period, "basis": sale["sale_basis"],
+                         "sale_group": sale["sale_group"], "adoption_revision": sale["adoption_revision"],
+                         "source": sale["source"], "order_id": sale["order_id"],
+                         "sequence": sale["sequence"], "event_id": sale["event_id"],
+                         **{name: contribution(sale)[name] for name in MEASURES}})
+        headers = (["edition_id", "data_revision", "period", "basis", "sale_group",
+                    "adoption_revision", "source", "order_id", "sequence", "event_id"]
+                   + list(MEASURES))
+        return encode_csv(headers, rows)
+
+    def sale_groups(self, identity, period="current"):
+        """期间内涉及的销售组快照：状态、采信决定与分歧字段。"""
+        _, reconciliation = self._reconciliation(identity, period)
+        rows = []
+        for group in reconciliation["groups"]:
+            decision = group["decision"] or {}
+            rows.append({"period": period, "group_id": group["id"], "status": group["status"],
+                         "evidence_id": group["evidence_id"],
+                         "adopted_source": decision.get("source"),
+                         "adopted_order_id": decision.get("order_id"),
+                         "adopted_sequence": decision.get("sequence"),
+                         "decision_revision": decision.get("revision"),
+                         "members": ";".join(f"{m['source']}:{m['order_id']}" for m in group["members"]),
+                         "differing_fields": ";".join(item["field"] for item in group["differences"])})
+        headers = ["period", "group_id", "status", "evidence_id", "adopted_source",
+                   "adopted_order_id", "adopted_sequence", "decision_revision",
+                   "members", "differing_fields"]
+        return encode_csv(headers, rows)
+
     def bundle(self, identity, published_only=False):
         document = self.document(identity, published_only)
         result = document["result"]
         files = {"edition.json": canonical(document).encode("utf-8"),
-                 "lineage.csv": self.lineage(identity).encode("utf-8")}
+                 "lineage.csv": self.lineage(identity).encode("utf-8"),
+                 "sale_lineage.csv": self.sale_lineage(identity).encode("utf-8")}
         for period in result["periods"]:
             for table in TABLE_DIMENSIONS:
                 files[f"{period}/{table}.csv"] = self.table(identity, table, period, published_only).encode("utf-8")
             files[f"{period}/coverage.csv"] = self.coverage(identity, period).encode("utf-8")
+            files[f"{period}/sales.csv"] = self.sales(identity, period).encode("utf-8")
+            files[f"{period}/sale_groups.csv"] = self.sale_groups(identity, period).encode("utf-8")
         manifest = {"format": "autumn-ledger-bundle-v1", "edition_id": identity,
                     "result_digest": document["result_digest"],
                     "files": {name: {"bytes": len(content), "sha256": self.bytes_digest(content)}

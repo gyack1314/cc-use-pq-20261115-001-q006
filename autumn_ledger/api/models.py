@@ -94,3 +94,33 @@ class AnomalyRequest(StrictModel):
     request: AnalysisRequest
     minimum_orders: StrictInt = 3
     multiplier: float = 3.0
+
+
+class EvidenceMember(StrictModel):
+    source: StrictStr
+    order_id: StrictStr
+
+
+class EvidenceSubmission(StrictModel):
+    evidence_id: StrictStr
+    members: list[EvidenceMember] = Field(min_length=2, max_length=10)
+    note: StrictStr = ""
+    actor: StrictStr = "operator"
+
+
+class SettleRequest(StrictModel):
+    action: Literal["accept", "reject"]
+    actor: StrictStr = "operator"
+    note: StrictStr = ""
+
+
+class AdoptRequest(StrictModel):
+    source: StrictStr
+    expected_sequence: StrictInt | None = None
+    actor: StrictStr = "operator"
+    note: StrictStr = ""
+
+
+class GroupActionRequest(StrictModel):
+    actor: StrictStr = "operator"
+    note: StrictStr = ""

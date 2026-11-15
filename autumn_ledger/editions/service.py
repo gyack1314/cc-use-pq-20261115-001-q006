@@ -94,9 +94,14 @@ class Editions:
         result = edition["result"]
         periods = {}
         for name, period in result["periods"].items():
+            reconciliation = period["sale_reconciliation"]
             periods[name] = {"window": period["window"], "exposure": period["exposure_summary"],
                              "coverage": period["coverage_summary"], "gaps": period["coverage_gaps"],
-                             "totals": period["cube"]["totals"], "reconciliation": period["cube"]["reconciliation"]}
+                             "totals": period["cube"]["totals"], "reconciliation": period["cube"]["reconciliation"],
+                             "dedup_totals": reconciliation["dedup_view"]["totals"],
+                             "unresolved_groups": reconciliation["unresolved_groups"],
+                             "held_evidence": [item["id"] for item in reconciliation["held_evidence"]],
+                             "difference_explanations": reconciliation["difference"]["explanations"]}
         return {"edition_id": identity, "state": edition["state"], "stale": edition["stale"],
                 "data_revision": edition["data_revision"], "result_digest": edition["result_digest"],
                 "periods": periods, "quality": result["quality"], "semantics": result["semantics"]}

@@ -2,6 +2,7 @@ from ..errors import require
 from ..values import fingerprint, utc_now
 from .comparison import comparable_coverage, compare_periods
 from .cubes import build_cubes
+from .dedup import period_reconciliation, sale_lineage_entry
 from .quality import quality_report, validate_result
 from .windows import daily_grid, exposure_summary, match_order, normalize_request, request_windows
 from .segments import profile_period, cross_shares
@@ -12,12 +13,13 @@ from .invariants import inspect_result
 
 
 class AnalysisEngine:
-    def __init__(self, database, catalog, calendars, coverage, intake):
+    def __init__(self, database, catalog, calendars, coverage, intake, linkage=None):
         self.database = database
         self.catalog = catalog
         self.calendars = calendars
         self.coverage = coverage
         self.intake = intake
+        self.linkage = linkage
 
     def run(self, value, connection=None):
         request = normalize_request(value)
@@ -27,9 +29,13 @@ class AnalysisEngine:
         revision = self.database.snapshot_revision(connection, request.get("revision"))
         references = self.validate_references(request, revision, connection)
         heads = self.intake.heads(revision, request["sources"], connection)
+        groups = self.linkage.state_at(revision, connection) if self.linkage else []
+        member_heads = self.linkage.member_heads(connection, revision, groups) if self.linkage else {}
+        held = self.linkage.held_evidence(connection, revision) if self.linkage else []
         windows = request_windows(request)
         periods = {}
         lineage = []
+        sale_lineage = []
         for name, window in windows.items():
             selected = [order for order in heads if match_order(order, request, window)]
             exposure = self.calendars.exposure(request["cities"], window.start, window.end, revision, connection)
@@ -37,10 +43,12 @@ class AnalysisEngine:
             matrix = self.coverage.matrix(request["sources"], request["cities"],
                                           window.start, window.end, revision, connection)
             cube = build_cubes(selected, window, request["cities"], grid)
+            reconciliation = period_reconciliation(selected, request, groups, member_heads, held)
             periods[name] = {"window": window.as_dict(), "orders": selected, "exposure": grid,
                              "exposure_summary": exposure_summary(grid), "coverage": matrix,
                              "coverage_summary": self.coverage.summary(matrix),
-                             "coverage_gaps": self.coverage.missing_groups(matrix), "cube": cube}
+                             "coverage_gaps": self.coverage.missing_groups(matrix), "cube": cube,
+                             "sale_reconciliation": reconciliation}
             period = periods[name]
             period["profiles"] = {dimension: profile_period(period, references, dimension)
                                   for dimension in ("origin", "destination", "source")}
@@ -53,6 +61,8 @@ class AnalysisEngine:
                 lineage.append({"period": name, "source": order["source"], "order_id": order["order_id"],
                                 "event_id": order["event_id"], "sequence": order["sequence"],
                                 "revision": order["ingested_revision"], "digest": fingerprint(order)})
+            for sale in reconciliation["dedup_view"]["sales"]:
+                sale_lineage.append(sale_lineage_entry(name, sale))
         comparison = None
         if "baseline" in periods:
             pairs = comparable_coverage(periods["current"]["coverage"], periods["baseline"]["coverage"],
@@ -63,6 +73,7 @@ class AnalysisEngine:
         result = {"format_version": 1, "data_revision": revision, "request": request,
                   "references": references, "periods": periods, "comparison": comparison,
                   "quality": quality, "lineage": lineage, "lineage_digest": fingerprint(lineage),
+                  "sale_lineage": sale_lineage, "sale_lineage_digest": fingerprint(sale_lineage),
                   "calculated_at": utc_now(), "semantics": self.semantics()}
         result["integrity"] = validate_result(result)
         result["statistical_checks"] = inspect_result(result)
@@ -93,14 +104,24 @@ class AnalysisEngine:
                 "refund": "refund_cents为订单累计退款，不是本次退款增量",
                 "coverage": "complete表示来源确认该城市日期数据已齐，未登记不能当零",
                 "denominator": "日均按选定城市日期暴露计，不按有订单的日期计",
+                "source_view": "来源口径保留每个来源的原始订单头，不做跨来源去重",
+                "dedup_view": "去重口径：同一销售组仅计入被采信的一份完整订单修订；未解决组不计入",
+                "adoption": "采信针对某来源某订单的某一修订；该修订之后发生变化则组回到待核对",
+                "no_field_merge": "不拼接不同来源的字段；去重记录始终等于某一来源的某一完整修订",
+                "linkage": "销售组只由提交的关联证据建立，不按金额或日期相近自动合并",
                 "scope": "仅描述所选来源订单，不推断总体或因果效应"}
 
     def preview(self, value):
         result = self.run(value)
+        reconciliation = result["periods"]["current"]["sale_reconciliation"]
         return {"data_revision": result["data_revision"], "request": result["request"],
                 "current": result["periods"]["current"]["cube"]["totals"],
                 "baseline": result["periods"].get("baseline", {}).get("cube", {}).get("totals"),
+                "dedup_current": reconciliation["dedup_view"]["totals"],
+                "unresolved_reconciliation": bool(reconciliation["unresolved_groups"]
+                                                  or reconciliation["held_evidence"]),
                 "quality": result["quality"], "lineage_digest": result["lineage_digest"],
+                "sale_lineage_digest": result["sale_lineage_digest"],
                 "integrity": result["integrity"]}
 
     def reconcile_revision(self, value, expected_digest):

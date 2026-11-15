@@ -4,6 +4,7 @@ from .reference.calendars import Calendars
 from .reference.coverage import Coverage
 from .records.intake import Intake
 from .records.csv_input import FileIntake
+from .records.linkage import Linkage
 from .analysis.engine import AnalysisEngine
 from .editions.service import Editions
 from .editions.review import Review
@@ -23,7 +24,9 @@ class Ledger:
         self.coverage = Coverage(self.database, self.catalog)
         self.intake = Intake(self.database, self.catalog)
         self.files = FileIntake(self.intake)
-        self.analysis = AnalysisEngine(self.database, self.catalog, self.calendars, self.coverage, self.intake)
+        self.linkage = Linkage(self.database, self.intake)
+        self.analysis = AnalysisEngine(self.database, self.catalog, self.calendars, self.coverage,
+                                       self.intake, self.linkage)
         self.editions = Editions(self.database, self.analysis)
         self.review = Review(self.database, self.editions)
         self.export = Export(self.editions, self.review)
